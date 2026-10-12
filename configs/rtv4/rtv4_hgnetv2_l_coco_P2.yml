@@ -1,0 +1,86 @@
+# 匯入其他基礎與預設 YAML 設定檔，載入模型結構、核心與資料集基底
+__include__: [
+  '../dfine/dfine_hgnetv2_l_coco.yml', # 載入 D-FINE HGNetV2-L 模型的架構設定檔
+  '../base/rtv4.yml',                  # 載入 RT-DETR v4 的訓練與模型基本邏輯設定
+  '../dataset/coco_detection.yml'      # 載入 COCO 標準資料集載入器的預設設定
+]
+
+task: detection                       # 指定模型的運行任務類型為「目標檢測 (Object Detection)」
+
+output_dir: ./outputs/rtv4_hgnetv2_l_coco2_p2 # 訓練過程中的 Checkpoint 權重檔與 Log 記錄檔輸出路徑【改動】
+
+num_classes: 7                        # 檢測目標的類別數量設定為 7 類【改動】
+remap_mscoco_category: False          # 關閉自動將類別 ID 重新映射為 MS COCO 80 類的機制【改動】
+num_queries: 300                      # Transformer 解碼器預測框 (Query) 的最大數量上限設為 300
+
+# ----------------- 1. 骨幹網路設定 (新增 P2 特徵層) -----------------
+HGNetv2:                              # 針對 HGNetV2 骨幹網路進行特徵提取層級的設定
+  return_idx: [0, 1, 2, 3]            # 導出 Stage 1~4 的特徵圖，依序對應 P2(1/4)、P3(1/8)、P4(1/16)、P5(1/32)【改動】
+
+# ----------------- 2. 混合編碼器設定 (適配 4 個尺度特徵融合) -----------------
+HybridEncoder:                        # 混合編碼器 (Hybrid Encoder / Neck) 模組設定
+  type: HybridEncoderP2               # 明確指定調用剛剛建立並註冊的 P2 專屬編碼器類別【改動】
+  in_channels: [128, 256, 512, 1024]  # 匹配 Backbone 輸出的 4 個特徵層通道數 (P2, P3, P4, P5)【改動】
+  feat_strides: [4, 8, 16, 32]        # 對應 4 個特徵層的下採樣步長/倍率【改動】
+  aifi_layer_idx: 3                   # 指定自注意力機制 (AIFI) 僅作用於最高層 P5 (索引 3)，避免 P2 計算量爆發【改動】
+  distill_teacher_dim: 768            # 知識蒸餾架構中，教師模型 (Teacher Model) 的特徵維度設定為 768
+
+# ----------------- 3. 解碼器與 Transformer 設定 (適配 4 個層級) -----------------
+DFINETransformer:                     # D-FINE Transformer 解碼器模組設定
+  num_levels: 4                       # 多尺度特徵層數量由 3 (P3~P5) 改為 4 (P2~P5)【改動】
+  eval_idx: -1                        # 評估階段採用的特徵層索引，-1 表示使用融合後的最終特徵層
+
+# ----------------- 訓練資料載入設定 -----------------
+train_dataloader:                     # 訓練集資料載入器 (DataLoader) 設定
+  dataset:                            # 訓練集資料設定
+    img_folder: '/home/doong/dataset/images' # 訓練集圖片存放的系統絕對路徑【改動】
+    ann_file: '/home/doong/dataset/train.json' # 訓練集 COCO 格式標註 JSON 檔的系統絕對路徑【改動】
+    transforms:                       # 訓練集圖片的數據增強與預處理鏈
+      type: Compose                   # 使用 Compose 將多個數據增強操作組裝在一起
+
+# ----------------- 驗證資料載入設定 -----------------
+val_dataloader:                       # 驗證集資料載入器 (DataLoader) 設定
+  dataset:                            # 驗證集資料設定
+    img_folder: '/home/doong/dataset/images' # 驗證集圖片存放的系統絕對路徑【改動】
+    ann_file: '/home/doong/dataset/val.json'   # 驗證集 COCO 格式標註 JSON 檔的系統絕對路徑【改動】
+    transforms:                       # 驗證集圖片的預處理鏈
+      type: Compose                   # 使用 Compose 將預處理操作組裝在一起
+  collate_fn:                         # Batch 資料拼接與整理函數設定
+    type: BatchImageCollateFunction   # 將不同尺寸的輸入圖片 Pack 整理成統一 Batch 的函數
+    base_size: 640                    # 驗證時模型輸入圖片的基本尺寸解析度設為 640x640
+
+# ----------------- 網路架構與損失函數調整 -----------------
+RTv4Criterion:                        # RT-DETR v4 損失函數計算模組設定
+  num_classes: 7                      # 損失函數匹配的類別數量設為 7 類【改動】
+  num_levels: 4                       # 損失函數匹配的多尺度特徵層數量設為 4 (P2~P5)【改動】
+  weight_dict:                        # 各項損失項目的權重字典設定
+    loss_distill: 0.0                 # 將知識蒸餾損失 (Distillation Loss) 的權重設為 0，即關閉蒸餾【改動】
+  distill_adaptive_params:            # 自適應蒸餾參數設定
+    enabled: False                    # 停用蒸餾過程中的自適應權重調整機制【改動】
+
+# ----------------- 優化器設定 (Optimizer) -----------------
+optimizer:                            # 模型訓練優化器設定
+  type: AdamW                         # 選用 AdamW 優化器 (帶權重衰減的 Adam)
+  params:                             # 針對不同網路層設定分組學習率與權重衰減 (Parameter Groups)
+    -                                 # 第一組參數：骨幹網路 (Backbone)
+      params: '^(?=.*backbone)(?!.*norm|bn).*$' # 正則表達式：匹配所有 Backbone 中非 Norm / BN 的層
+      lr: 0.000025                    # 骨幹網路的學習率獨立設定為 2.5e-5【改動】
+    -                                 # 第二組參數：Normalization 正規化層
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn)).*$' # 正則表達式：匹配 Encoder/Decoder 中的 Norm / BN 層
+      weight_decay: 0.                # Normalization 層的權重衰減設為 0，避免破壞歸一化效果
+
+  lr: 0.0005                          # 全域基本學習率 (Base Learning Rate) 設定為 0.0005【改動】
+  betas: [0.9, 0.999]                 # AdamW 優化器的一階與二階動量衰減率係數
+  weight_decay: 0.000125              # 模型權重衰減係數 (Weight Decay)，用於 L2 正則化防止過擬合
+
+# ----------------- 訓練輪數與排程 -----------------
+epoches: 58                           # 模型總訓練輪數 (Total Epochs) 設定為 58【改動】
+flat_epoch: 29                        # 前 29 個 Epoch 保持初始學習率，之後開始執行學習率衰減排程【改動】
+no_aug_epoch: 8                       # 最後 8 個 Epoch 關閉 Mosaic 等強數據增強，確保模型平穩收斂【改動】
+
+find_unused_parameters: True          # 分散式訓練 (DDP) 時允許存在未參與梯度計算的反向傳播參數
+
+# ----------------- 評估器設定 -----------------
+evaluator:                            # 驗證階段的模型評估器設定
+  type: CocoEvaluator                 # 選用標準 COCO API 評估器
+  iou_types: ['bbox']                 # 指定計算 2D 邊界框 (Bounding Box) 的 mAP 指標

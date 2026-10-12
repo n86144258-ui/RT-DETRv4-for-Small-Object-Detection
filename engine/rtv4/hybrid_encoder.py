@@ -240,10 +240,16 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.activation = get_activation(activation)
 
-    @staticmethod
-    def with_pos_embed(tensor, pos_embed):
-        return tensor if pos_embed is None else tensor + pos_embed
-
+    #@staticmethod
+    #def with_pos_embed(tensor, pos_embed):
+    #    return tensor if pos_embed is None else tensor + pos_embed
+    def with_pos_embed(self, tensor, pos_embed):
+        if pos_embed is None:
+            return tensor
+        if pos_embed.device != tensor.device:
+            pos_embed = pos_embed.to(tensor.device)
+        return tensor + pos_embed
+    #---
     def forward(self, src, src_mask=None, pos_embed=None) -> torch.Tensor:
         residual = src
         if self.normalize_before:

@@ -6,7 +6,7 @@ __include__: [
   '../base/dfine_hgnetv2.yml',
 ]
 
-output_dir: ./outputs/dfine_hgnetv2_l_coco
+output_dir: ./outputs/dfine_hgnetv2_l_coco2
 
 
 HGNetv2:
@@ -37,8 +37,8 @@ train_dataloader:
   dataset:
     transforms:
       policy:
-        epoch: 72
+        epoch: 50 #原72 (58 - 8 = 50) 確保第 50 epoch 時切換增強策略
   collate_fn:
-    stop_epoch: 72
+    stop_epoch: 50 #原72 配合上面epoch
     ema_restart_decay: 0.9999
     base_size_repeat: 4

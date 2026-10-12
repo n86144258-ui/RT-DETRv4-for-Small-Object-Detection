@@ -1,0 +1,89 @@
+# 匯入其他基礎與預設 YAML 設定檔，載入模型結構、核心與資料集基底
+__include__: [
+  '../dfine/dfine_hgnetv2_l_coco.yml', # 載入 D-FINE HGNetV2-L 模型的架構設定
+  '../base/rtv4.yml',                  # 載入 RT-DETR v4 的訓練基本邏輯
+  '../dataset/coco_detection.yml'      # 載入 COCO 資料集載入器預設值
+]
+
+task: detection                       # 指定任務類型為「目標檢測 (Object Detection)」
+
+output_dir: ./outputs/rtv4_hgnetv2_l_coco_dinov2 # 訓練模型權重與 Log 輸出的資料夾路徑
+
+num_classes: 7                        # 類別數量改為 7 類【改動】
+remap_mscoco_category: False          # 是否要自動重新映射 MS COCO 的 80 類 ID【改動】
+num_queries: 300                      # 模型同時預測的查詢 (Query) 數量上限設為 300
+
+# ----------------- 訓練資料載入設定 -----------------
+train_dataloader:
+  dataset:
+    img_folder: '/home/doong/dataset/images' # 訓練圖片所在的絕對路徑【改動】
+    ann_file: '/home/doong/dataset/train.json' # 訓練集的 COCO 格式 JSON 標註檔案路徑【改動】
+    transforms:
+      type: Compose                   # 資料增強與預處理組合
+
+# ----------------- 驗證資料載入設定 -----------------
+val_dataloader:
+  dataset:
+    img_folder: '/home/doong/dataset/images' # 驗證圖片所在的絕對路徑【改動】
+    ann_file: '/home/doong/dataset/val.json'   # 驗證集的 COCO 格式 JSON 標註檔案路徑【改動】
+    transforms:
+      type: Compose                   # 驗證資料預處理組合
+  collate_fn:
+    type: BatchImageCollateFunction   # Batch 整理函數，用於將不同尺寸圖片 Pack 在一起
+    base_size: 640                    # 驗證時圖片的基本解析度設為 640x640
+
+# ----------------- 網路架構與損失函數調整 -----------------
+HybridEncoder:
+  distill_teacher_dim: 1024           # 若使用 DINOv2 ViT-L/14，請設為 1024 (若使用 ViT-B 則設為 768)
+
+RTv4Criterion:
+  weight_dict:
+    loss_distill: 1.0                 # 開啟知識蒸餾 Loss，權重設為 1.0 (或 0.5 ~ 1.0）權重降為 0，即「關閉知識蒸餾」【改動】
+  distill_adaptive_params:
+    enabled: True
+    rho: 2
+    delta: 0.25
+    default_weight: 20
+    
+# ----------------- 導師模型 (Teacher Model) 配置 -----------------
+distiller:
+  type: VFMDistiller
+  enabled: True                       # 【新增】開啟導師蒸餾
+
+  teacher:
+    type: VisionFoundationModel
+    name: 'dinov2_vitl14'
+    pretrained: 'pretrain/dinov2_vitl14_pretrain.pth' # 導師模型的預訓練權重路徑
+    frozen: True                      # 【關鍵】凍結導師權重，防止更新與節省顯存
+
+  dsi:
+    student_feature_layer: 'F5'       # 注入學生模型的 F5 特徵層
+    embed_dim: 1024                   # 需與 distill_teacher_dim 及導師模型輸出一致 (DINOv2-L 為 1024)   
+    
+
+# ----------------- 優化器設定 (Optimizer) -----------------
+optimizer:
+  type: AdamW                         # 使用 AdamW 優化器
+  params:                             # 分組學習率 (Parameter Groups) 設定
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$' # 針對 Backbone 的非 Normalization 層
+      lr: 0.000025                    # 主幹網路 Learning Rate 設為 2.5e-5【改動】
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn)).*$' # 針對 Encoder/Decoder 的 Normalization 層
+      weight_decay: 0.                # 正則化權重衰減設為 0，避免過度懲罰 Norm 層
+
+  lr: 0.0005                          # 全域基本學習率 (Base Learning Rate) 改為 0.0005【改動】
+  betas: [0.9, 0.999]                 # AdamW 一階與二階動量衰減率
+  weight_decay: 0.000125              # 權重衰減係數 (Weight Decay)
+
+# ----------------- 訓練輪數與排程 -----------------
+epoches: 58                           # 總訓練輪數 (Epoch) 設定為 58【改動】
+flat_epoch: 29                        # 前 29 個 Epoch 使用固定學習率，之後開始衰減【改動】
+no_aug_epoch: 8                       # 最後 8 個 Epoch 關閉馬賽克等強資料增強，以穩定收斂【改動】
+
+find_unused_parameters: True          # 分散式訓練 (DDP) 時允許存在未參與梯度計算的參數
+
+# ----------------- 評估器設定 -----------------
+evaluator:
+  type: CocoEvaluator                 # 使用 COCO 標準評估器
+  iou_types: ['bbox']                 # 計算 2D 邊界框 (Bounding Box) 的 mAP

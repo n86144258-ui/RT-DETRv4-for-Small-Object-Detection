@@ -1,0 +1,206 @@
+task: detection
+
+num_classes: 7
+remap_mscoco_category: False
+num_queries: 300
+
+output_dir: ./outputs/rtv4_hgnetv2_l_coco
+
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: /home/doong/dataset/images
+    ann_file: /home/doong/dataset/train.json
+    transforms:
+      type: Transforms
+      ops:
+        - type: Mosaic
+          output_size: 320
+          rotation_range: 10
+          translation_range: [0.1, 0.1]
+          scaling_range: [0.5, 1.5]
+          probability: 1.0
+          fill_value: 0
+          use_cache: False
+          max_cached_images: 50
+          random_pop: True
+        - type: RandomPhotometricDistort
+          p: 0.5
+        - type: RandomZoomOut
+          fill: 0
+        - type: RandomIoUCrop
+          p: 0.8
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        - type: RandomHorizontalFlip
+        - type: Resize
+          size: [640, 640]
+        - type: SanitizeBoundingBoxes
+          min_size: 1
+        - type: ConvertPILImage
+          dtype: 'float32'
+          scale: True
+        - type: ConvertBoxes
+          fmt: 'cxcywh'
+          normalize: True
+      policy:
+        name: stop_epoch
+        epoch: [4, 29, 50]
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+      mosaic_prob: 0.5
+  shuffle: True
+  total_batch_size: 32
+  num_workers: 4
+  collate_fn:
+    type: BatchImageCollateFunction
+    base_size: 640
+    base_size_repeat: 4
+    stop_epoch: 50
+    ema_restart_decay: 0.9999
+    mixup_prob: 0.5
+    mixup_epochs: [4, 29]
+
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: /home/doong/dataset/images
+    ann_file: /home/doong/dataset/val.json
+    transforms:
+      type: Transforms
+      ops:
+        - type: Resize
+          size: [640, 640]
+        - type: ConvertPILImage
+          dtype: 'float32'
+          scale: True
+  shuffle: False
+  total_batch_size: 64
+  num_workers: 4
+
+model: RTv4
+criterion: RTv4Criterion
+postprocessor: PostProcessor
+use_focal_loss: True
+eval_spatial_size: [640, 640]
+
+RTv4:
+  backbone: HGNetv2
+  encoder: HybridEncoder
+  decoder: DFINETransformer
+
+HGNetv2:
+  pretrained: True
+  local_model_dir: './pretrain/hgnetv2/'
+  name: 'B4'
+  return_idx: [1, 2, 3]
+  freeze_stem_only: True
+  freeze_at: -1
+  freeze_norm: False
+
+HybridEncoder:
+  in_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.0
+  enc_act: 'gelu'
+  expansion: 1.0
+  depth_mult: 1
+  act: 'silu'
+  distill_teacher_dim: 768
+
+DFINETransformer:
+  feat_channels: [256, 256, 256]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  num_levels: 3
+  num_layers: 6
+  eval_idx: -1
+  num_queries: 300
+  num_denoising: 100
+  label_noise_ratio: 0.5
+  box_noise_scale: 1.0
+  reg_max: 32
+  reg_scale: 4
+  layer_scale: 1
+  num_points: [3, 6, 3]
+  cross_attn_method: 'default'
+  query_select_method: 'default'
+  activation: 'silu'
+  mlp_act: 'silu'
+
+PostProcessor:
+  num_top_queries: 300
+
+RTv4Criterion:
+  weight_dict:
+    loss_vfl: 1
+    loss_bbox: 5
+    loss_giou: 2
+    loss_fgl: 0.15
+    loss_ddf: 1.5
+    loss_mal: 1
+    loss_distill: 0.0
+  losses: ['mal', 'boxes', 'local', 'distill']
+  alpha: 0.75
+  gamma: 1.5
+  reg_max: 32
+  matcher:
+    type: HungarianMatcher
+    weight_dict:
+      cost_class: 2
+      cost_bbox: 5
+      cost_giou: 2
+    alpha: 0.25
+    gamma: 2.0
+  distill_adaptive_params:
+    enabled: False
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn)).*$'
+      weight_decay: 0.
+  lr: 0.0005
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125
+
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [500]
+  gamma: 0.1
+
+lr_warmup_scheduler:
+  type: LinearWarmup
+  warmup_duration: 500
+
+lrsheduler: flatcosine
+lr_gamma: 0.5
+warmup_iter: 2000
+flat_epoch: 29
+no_aug_epoch: 8
+epoches: 58
+checkpoint_freq: 4
+sync_bn: True
+find_unused_parameters: False
+use_amp: True
+use_ema: True
+
+scaler:
+  type: GradScaler
+  enabled: True
+
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  warmups: 1000
+  start: 0

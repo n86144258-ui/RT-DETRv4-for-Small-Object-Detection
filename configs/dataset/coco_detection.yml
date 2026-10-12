@@ -1,41 +1,81 @@
-task: detection
+task: detection # 指定任務類型為目標檢測 (Object Detection)
 
-evaluator:
-  type: CocoEvaluator
-  iou_types: ['bbox', ]
-
-num_classes: 80
-remap_mscoco_category: True
-
-train_dataloader: 
-  type: DataLoader
-  dataset: 
-    type: CocoDetection
-    img_folder: /root/share/data/COCO2017/train2017/
-    ann_file: /root/share/data/COCO2017/annotations/instances_train2017.json
-    return_masks: False
+train_dataloader:
+  type: DataLoader # 資料載入器類型為 PyTorch 的 DataLoader
+  dataset:
+    type: CocoDetection # 資料集格式為 MS COCO 檢測資料集
+    img_folder: /home/doong/dataset/images # 訓練集圖片存放路徑
+    ann_file: /home/doong/dataset/train.json # 訓練集標註檔 (JSON) 路徑
     transforms:
-      type: Compose
-      ops: ~
-  shuffle: True
-  num_workers: 4
-  drop_last: True 
-  collate_fn:
-    type: BatchImageCollateFunction
+      ops: # 資料增強與預處理的操作序列 (流水線)
+        - type: Mosaic # 拼接增強：將 4 張圖片拼接成一張，提升小目標檢測能力
+          output_size: 320 # 拼接後的輸出尺寸
+          rotation_range: 10 # 隨機旋轉角度範圍 (±10 度)
+          translation_range: [0.1, 0.1] # 隨機平移範圍 (長寬比例)
+          scaling_range: [0.5, 1.5] # 隨機縮放比例範圍
+          probability: 1.0 # 觸發 Mosaic 增強的機率 (100%)
+          fill_value: 0 # 邊框填充顏色數值 (黑色)
+          use_cache: False # 是否快取圖片至記憶體以加速載入
+          max_cached_images: 50 # 最大快取圖片數量
+          random_pop: True # 是否隨機從快取中替換圖片
+        - type: RandomPhotometricDistort # 隨機色彩與光照失真 (調整亮度、對比度、飽和度等)
+          p: 0.5 # 觸發機率 (50%)
+        - type: RandomZoomOut # 隨機縮小圖片 (在外圍填補背景，幫助檢測小物件)
+          fill: 0 # 填補顏色數值 (黑色)
+        - type: RandomIoUCrop # 根據 Bounding Box 的 IoU 隨機裁剪圖片
+          p: 0.8 # 觸發機率 (80%)
+        - type: SanitizeBoundingBoxes # 清理無效標註框 (例如裁剪後過小或超出範圍的框)
+          min_size: 1 # 邊框最小寬高限制 (像素)
+        - type: RandomHorizontalFlip # 隨機水平翻轉圖片
+        - type: Resize # 將圖片調整至指定尺寸
+          size: [640, 640] # 輸入模型的目標尺寸 [高, 寬]
+        - type: SanitizeBoundingBoxes # 再次清理 Resize 後可能產生的無效邊框
+          min_size: 1 # 邊框最小寬高限制
+        - type: ConvertPILImage # 將 PIL 圖片轉換為 PyTorch Tensor 格式
+          dtype: 'float32' # 資料類別轉換為單精度浮點數
+          scale: True # 是否將像素值歸一化至 [0, 1] 範圍
+        - type: ConvertBoxes # 轉換標註框的座標格式
+          fmt: 'cxcywh' # 格式變更為 [中心點X, 中心點Y, 寬, 高]
+          normalize: True # 將座標值歸一化至 [0, 1] 範圍
+      policy: # 訓練策略：控制增強操作的關閉時機 (避免訓練後期影響收斂)
+        name: stop_epoch # 策略類型：指定 Epoch 停止特定增強
+        epoch: [4, 29, 50] # 階段性關閉增強的 Epoch 時間點
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop'] # 屆時將關閉的強增強操作列表
+      mosaic_prob: 0.5 # 訓練過程中應用 Mosaic 的整體觸發機率
 
+  collate_fn: # 批次資料組裝函式 (批處理優化)
+    type: BatchImageCollateFunction # 專為檢測任務設計的圖像批次組裝器
+    base_size: 640 # 多尺度訓練的基本圖像尺寸
+    base_size_repeat: 4 # 調整多尺度尺寸的變換頻率/週期
+    stop_epoch: 50 # 第 50 個 Epoch 後停止強增強/多尺度變換
+    ema_restart_decay: 0.9999 # EMA (指數移動平均) 模型的衰減率
+    mixup_prob: 0.5 # MixUp (兩圖混合) 增強的觸發機率
+    mixup_epochs: [4, 29] # 執行 MixUp 增強的 Epoch 區間
+
+  shuffle: True # 是否在每個 Epoch 開始時隨機打亂訓練集順序
+
+  # 原本 32 → 改成 4
+  total_batch_size: 4 # 訓練時總 Batch Size (若多卡會平均分配)
+
+  num_workers: 4 # 資料載入時使用的 CPU 多執行緒數量
 
 val_dataloader:
-  type: DataLoader
-  dataset: 
-    type: CocoDetection
-    img_folder: /root/share/data/COCO2017/val2017/
-    ann_file: /root/share/data/COCO2017/annotations/instances_val2017.json
-    return_masks: False
+  type: DataLoader # 驗證集資料載入器
+  dataset:
+    type: CocoDetection # 驗證集同樣採用 COCO 格式
+    img_folder: /home/doong/dataset/images # 驗證集圖片存放路徑
+    ann_file: /home/doong/dataset/val.json # 驗證集標註檔 (JSON) 路徑
     transforms:
-      type: Compose
-      ops: ~ 
-  shuffle: False
-  num_workers: 4
-  drop_last: False
-  collate_fn:
-    type: BatchImageCollateFunction
+      ops: # 驗證集預處理流水線 (僅做基本調整，不加隨機增強)
+        - type: Resize # 調整圖片尺寸
+          size: [640, 640] # 保持與訓練尺寸一致 [640, 640]
+        - type: ConvertPILImage # 轉換為 Tensor
+          dtype: 'float32' # 轉為浮點數
+          scale: True # 像素值歸一化至 [0, 1]
+
+  shuffle: False # 驗證時不需要打亂順序，保持固定順序以便評估
+
+  # 原本 64 → 改成 8
+  total_batch_size: 8 # 驗證時總 Batch Size
+
+  num_workers: 4 # 驗證資料載入使用的 CPU 執行緒數
